@@ -1,20 +1,20 @@
 SELECT
     r.session_id AS ProcessID,
     r.status,
-    r.start_time,
-    DATEDIFF(MINUTE, r.start_time, GETDATE()) AS DurationInMinutes,
+    s.login_time,
+    DATEDIFF(MINUTE, s.login_time, GETDATE()) AS SessionDurationMinutes,
     r.total_elapsed_time / 1000 AS TotalElapsedTimeInSeconds,
     r.cpu_time AS CPUTimeInMilliseconds,
     s.login_name AS LoginName,
     s.host_name AS HostName,
-    t.text AS SQLText  -- ✅ Added: Shows the SQL text being executed
+    t.text AS SQLText  -- ✅ Actual SQL text being executed
 FROM
     sys.dm_exec_requests r
 JOIN
     sys.dm_exec_sessions s ON r.session_id = s.session_id
 CROSS APPLY
-    sys.dm_exec_sql_text(r.sql_handle) t  -- ✅ This pulls the SQL text
+    sys.dm_exec_sql_text(r.sql_handle) t
 WHERE
-    DATEDIFF(MINUTE, r.start_time, GETDATE()) > 1440
-    AND r.status IN ('running', 'suspended', 'Background', 'Sleeping', 'Runnable')
-    AND s.login_name = 'RRTUSER';
+    DATEDIFF(MINUTE, s.login_time, GETDATE()) > 1440
+    AND s.login_name = 'RRTUSER'
+    AND r.status IN ('running', 'suspended', 'runnable');  -- ✅ Valid statuses only
