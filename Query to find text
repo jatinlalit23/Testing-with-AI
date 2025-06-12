@@ -1,1 +1,18 @@
 
+SELECT
+    r.session_id AS ProcessID,
+    r.status,
+    r.start_time,
+    DATEDIFF(MINUTE, r.start_time, GETDATE()) AS DurationInMinutes,
+    r.total_elapsed_time / 1000 AS TotalElapsedTimeInSeconds,  -- Total elapsed time in seconds
+    r.cpu_time AS CPUTimeInMilliseconds,  -- CPU time in milliseconds
+    s.login_name AS LoginName,  -- User login name
+    s.host_name AS HostName  -- Host name from where the session is connected
+FROM
+    sys.dm_exec_requests r
+JOIN
+    sys.dm_exec_sessions s ON r.session_id = s.session_id
+WHERE
+    DATEDIFF(MINUTE, r.start_time, GETDATE()) > 1440  -- 1440 minutes = 24 hours
+    AND r.status IN ('running', 'suspended','Background','Sleeping','Runnable')
+	AND s.login_name = 'RRTUSER';
