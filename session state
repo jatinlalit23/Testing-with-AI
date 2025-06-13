@@ -1,0 +1,22 @@
+SELECT 
+    s.session_id,
+    s.login_time,
+    s.host_name,
+    s.program_name,
+    s.login_name,
+    s.status,
+    r.start_time AS request_start_time,
+    r.command,
+    t.text AS sql_text,
+    r.wait_type,
+    r.wait_time
+FROM 
+    sys.dm_exec_sessions s
+LEFT JOIN 
+    sys.dm_exec_requests r ON s.session_id = r.session_id
+OUTER APPLY 
+    sys.dm_exec_sql_text(r.sql_handle) t
+WHERE 
+    s.is_user_process = 1  -- Filter out system sessions
+ORDER BY 
+    s.session_id;
