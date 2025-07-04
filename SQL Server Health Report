@@ -1,0 +1,366 @@
+Below is a SQL Server Health Check Report Script designed for daily execution and can be shared with a server owner. It covers basic but essential health checks:
+1. SQL Server uptime
+2. SQL Server version and edition
+3. Database status and size
+4. Disk space usage
+5. CPU usage (last 5 minutes)
+6. Memory usage
+7. Failed SQL Agent jobs (last 24 hours)
+8. Error log (last 24 hours - top errors)
+You can run this script via SQL Server Agent daily and export the result to an HTML or Excel file using tools like sp_send_dbmail or PowerShell for email delivery.
+
+--NOW we have query for above 1 to 8 points
+
+-- Daily SQL Server Health Check Report
+-- Run this as a SQL Agent Job daily
+
+SET NOCOUNT ON;
+
+PRINT '===== SQL SERVER DAILY HEALTH REPORT =====';
+PRINT 'Date/Time: ' + CONVERT(VARCHAR, GETDATE(), 120);
+PRINT '==========================================';
+
+-- 1. SQL Server Version and Uptime
+PRINT '1. SERVER VERSION & UPTIME';
+SELECT
+    SERVERPROPERTY('MachineName') AS ServerName,
+    SERVERPROPERTY('InstanceName') AS Instance,
+    SERVERPROPERTY('Edition') AS Edition,
+    SERVERPROPERTY('ProductLevel') AS ProductLevel,
+    SERVERPROPERTY('ProductVersion') AS ProductVersion,
+    sqlserver_start_time AS SqlServerStartTime,
+    DATEDIFF(HOUR, sqlserver_start_time, GETDATE()) AS Uptime_Hours
+FROM sys.dm_os_sys_info;
+
+-- 2. Database Status and Size
+PRINT '2. DATABASE STATUS AND SIZE';
+SELECT
+    name AS [Database Name],
+    state_desc AS [Status],
+    recovery_model_desc AS [Recovery Model],
+    (SELECT SUM(size)*8/1024.0 FROM sys.master_files mf WHERE mf.database_id = db.database_id) AS [Total Size (MB)]
+FROM sys.databases db;
+
+-- 3. CPU Usage (last 5 minutes)
+PRINT '3. CPU USAGE - LAST 5 MINUTES';
+SELECT 
+    record_id,
+    DATEADD(ms, [timestamp] - sys.ms_ticks, GETDATE()) AS SampleTime,
+    SQLProcessUtilization AS [SQL Server CPU %],
+    SystemIdle AS [System Idle %],
+    100 - SystemIdle - SQLProcessUtilization AS [Other CPU %]
+FROM sys.dm_os_ring_buffers
+CROSS JOIN sys.dm_os_sys_info sys
+WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+AND record_id IN (
+    SELECT MAX(record_id) 
+    FROM sys.dm_os_ring_buffers 
+    WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+);
+
+-- 4. Memory Usage
+PRINT '4. MEMORY USAGE';
+SELECT 
+    physical_memory_kb/1024 AS [Physical Memory (MB)],
+    virtual_memory_kb/1024 AS [Virtual Memory (MB)],
+    commited_kb/1024 AS [Committed Memory (MB)],
+    committed_target_kb/1024 AS [Target Committed (MB)],
+    page_fault_count AS [Page Faults]
+FROM sys.dm_os_sys_memory;
+
+-- 5. Disk Space Available per Drive
+PRINT '5. DISK SPACE AVAILABLE';
+EXEC xp_fixeddrives;
+
+-- 6. Failed SQL Agent Jobs in Last 24 Hours
+PRINT '6. FAILED SQL AGENT JOBS - LAST 24 HOURS';
+SELECT 
+    j.name AS [Job Name],
+    h.run_date,
+    h.run_time,
+    h.run_status
+FROM msdb.dbo.sysjobhistory h
+JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
+WHERE h.run_status <> 1
+AND h.run_date >= CONVERT(VARCHAR, GETDATE()-1, 112);
+
+-- 7. Errors from SQL Server Error Log (last 24 hours)
+PRINT '7. SQL SERVER ERRORS - LAST 24 HOURS';
+EXEC xp_readerrorlog 0, 1, NULL, NULL, GETDATE()-1, GETDATE(), 'DESC';
+
+PRINT '===== END OF REPORT =====';
+----------------------------What is next after query----------------------------------
+--✅ Save the health report output into a table
+--✅ Email the report as HTML using sp_send_dbmail
+----------------------------------
+
+--Step 1: Create a Table to Store the Daily Health Report
+
+USE [YourMonitoringDB]; -- Replace with your DB name
+GO
+
+CREATE TABLE dbo.SqlServerDailyHealthReport (
+    ReportDate       DATETIME DEFAULT GETDATE(),
+    Section          VARCHAR(100),
+    Detail           NVARCHAR(MAX)
+);
+
+-- Step 2: Insert Report Data into the Table (new update script  same as above one )
+
+USE [YourMonitoringDB]; -- Replace with your DB name
+GO
+
+DECLARE @ReportDate DATETIME = GETDATE();
+
+-- Helper procedure
+DECLARE @Section VARCHAR(100), @Detail NVARCHAR(MAX);
+
+-- Clear today's entries if re-running
+DELETE FROM dbo.SqlServerDailyHealthReport WHERE CAST(ReportDate AS DATE) = CAST(@ReportDate AS DATE);
+
+-- 1. SERVER VERSION & UPTIME
+SET @Section = '1. SERVER VERSION & UPTIME';
+SELECT @Detail = (
+    SELECT
+        'Server: ' + CAST(SERVERPROPERTY('MachineName') AS VARCHAR) +
+        ', Edition: ' + CAST(SERVERPROPERTY('Edition') AS VARCHAR) +
+        ', Version: ' + CAST(SERVERPROPERTY('ProductVersion') AS VARCHAR) +
+        ', Uptime (hrs): ' + CAST(DATEDIFF(HOUR, sqlserver_start_time, GETDATE()) AS VARCHAR)
+    FROM sys.dm_os_sys_info
+    FOR XML PATH(''), TYPE
+).value('.', 'NVARCHAR(MAX)');
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail) VALUES (@ReportDate, @Section, @Detail);
+
+-- 2. DATABASE STATUS
+SET @Section = '2. DATABASE STATUS';
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail)
+SELECT 
+    @ReportDate,
+    @Section,
+    'Database: ' + name + ', State: ' + state_desc + ', Recovery: ' + recovery_model_desc + 
+    ', Size(MB): ' + CAST((SELECT SUM(size)*8/1024.0 FROM sys.master_files mf WHERE mf.database_id = db.database_id) AS VARCHAR)
+FROM sys.databases db;
+
+-- 3. CPU USAGE
+SET @Section = '3. CPU USAGE - LAST SAMPLE';
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail)
+SELECT 
+    @ReportDate,
+    @Section,
+    'SQL CPU: ' + CAST(SQLProcessUtilization AS VARCHAR) + '%, Idle: ' + CAST(SystemIdle AS VARCHAR) + 
+    '%, Other: ' + CAST(100 - SystemIdle - SQLProcessUtilization AS VARCHAR) + '%'
+FROM sys.dm_os_ring_buffers
+CROSS JOIN sys.dm_os_sys_info sys
+WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+AND record_id IN (
+    SELECT MAX(record_id) 
+    FROM sys.dm_os_ring_buffers 
+    WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+);
+
+-- 4. MEMORY USAGE
+SET @Section = '4. MEMORY USAGE';
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail)
+SELECT 
+    @ReportDate,
+    @Section,
+    'Physical: ' + CAST(physical_memory_kb/1024 AS VARCHAR) + ' MB, Virtual: ' + CAST(virtual_memory_kb/1024 AS VARCHAR) + 
+    ', Committed: ' + CAST(commited_kb/1024 AS VARCHAR) + ' MB, Page Faults: ' + CAST(page_fault_count AS VARCHAR)
+FROM sys.dm_os_sys_memory;
+
+-- 5. DISK SPACE
+SET @Section = '5. DISK SPACE AVAILABLE';
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail)
+EXEC xp_fixeddrives;
+
+-- 6. FAILED SQL JOBS
+SET @Section = '6. FAILED JOBS (24h)';
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail)
+SELECT 
+    @ReportDate,
+    @Section,
+    'Job: ' + j.name + ', Date: ' + CAST(h.run_date AS VARCHAR) + ', Time: ' + CAST(h.run_time AS VARCHAR)
+FROM msdb.dbo.sysjobhistory h
+JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
+WHERE h.run_status <> 1
+AND h.run_date >= CONVERT(VARCHAR, GETDATE()-1, 112);
+
+-- 7. ERROR LOGS (Last 24h)
+SET @Section = '7. ERROR LOG - LAST 24H';
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail)
+EXEC xp_readerrorlog 0, 1, NULL, NULL, GETDATE()-1, GETDATE(), 'DESC';
+
+
+---Email the Report via sp_send_dbmail (Make sure Database Mail is configured.)
+
+EXEC msdb.dbo.sp_send_dbmail
+    @profile_name = 'YourMailProfile', -- Change this
+    @recipients = 'server.owner@example.com', -- Change this
+    @subject = 'SQL Server Daily Health Report',
+    @body_format = 'HTML',
+    @body = (
+        SELECT CAST(
+            '<html><body><h2>SQL Server Daily Health Report</h2><table border="1" cellpadding="4" cellspacing="0">' +
+            (
+                SELECT 
+                    '<tr><td><b>' + Section + '</b></td><td>' + REPLACE(Detail, '<', '&lt;') + '</td></tr>'
+                FROM dbo.SqlServerDailyHealthReport
+                WHERE CAST(ReportDate AS DATE) = CAST(GETDATE() AS DATE)
+                FOR XML PATH(''), TYPE
+            ).value('.', 'NVARCHAR(MAX)') +
+            '</table></body></html>' AS NVARCHAR(MAX)
+        )
+    );
+
+
+----SQL Script to Create Agent Job: Daily_SQL_Health_Report
+
+USE msdb;
+GO
+
+-- Create the Job
+EXEC sp_add_job  
+    @job_name = N'Daily_SQL_Health_Report',  
+    @enabled = 1,
+    @description = N'Collects and emails daily SQL Server health report',
+    @category_name = N'[Uncategorized (Local)]';
+GO
+
+-- Step 1: Collect Health Report
+EXEC sp_add_jobstep  
+    @job_name = N'Daily_SQL_Health_Report',  
+    @step_name = N'Collect Health Report',  
+    @subsystem = N'TSQL',  
+    @database_name = N'YourMonitoringDB',  -- Replace with your DB name  
+    @command = N'
+DECLARE @ReportDate DATETIME = GETDATE();
+DECLARE @Section VARCHAR(100), @Detail NVARCHAR(MAX);
+
+-- Clear today''s entries
+DELETE FROM dbo.SqlServerDailyHealthReport WHERE CAST(ReportDate AS DATE) = CAST(@ReportDate AS DATE);
+
+-- Section 1
+SET @Section = ''1. SERVER VERSION & UPTIME'';
+SELECT @Detail = (
+    SELECT
+        ''Server: '' + CAST(SERVERPROPERTY(''MachineName'') AS VARCHAR) +
+        '', Edition: '' + CAST(SERVERPROPERTY(''Edition'') AS VARCHAR) +
+        '', Version: '' + CAST(SERVERPROPERTY(''ProductVersion'') AS VARCHAR) +
+        '', Uptime (hrs): '' + CAST(DATEDIFF(HOUR, sqlserver_start_time, GETDATE()) AS VARCHAR)
+    FROM sys.dm_os_sys_info
+    FOR XML PATH(''''), TYPE
+).value(''.'', ''NVARCHAR(MAX)'');
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail) VALUES (@ReportDate, @Section, @Detail);
+
+-- Section 2: DB Status
+SET @Section = ''2. DATABASE STATUS'';
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail)
+SELECT 
+    @ReportDate, @Section,
+    ''DB: '' + name + '', State: '' + state_desc + '', Recovery: '' + recovery_model_desc + 
+    '', Size(MB): '' + CAST((SELECT SUM(size)*8/1024.0 FROM sys.master_files mf WHERE mf.database_id = db.database_id) AS VARCHAR)
+FROM sys.databases db;
+
+-- Section 3: CPU
+SET @Section = ''3. CPU USAGE'';
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail)
+SELECT 
+    @ReportDate, @Section,
+    ''SQL CPU: '' + CAST(SQLProcessUtilization AS VARCHAR) + ''%, Idle: '' + CAST(SystemIdle AS VARCHAR) +
+    ''%, Other: '' + CAST(100 - SystemIdle - SQLProcessUtilization AS VARCHAR) + ''%''
+FROM sys.dm_os_ring_buffers
+CROSS JOIN sys.dm_os_sys_info
+WHERE ring_buffer_type = N''RING_BUFFER_SCHEDULER_MONITOR''
+AND record_id IN (
+    SELECT MAX(record_id) 
+    FROM sys.dm_os_ring_buffers 
+    WHERE ring_buffer_type = N''RING_BUFFER_SCHEDULER_MONITOR''
+);
+
+-- Section 4: Memory
+SET @Section = ''4. MEMORY USAGE'';
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail)
+SELECT 
+    @ReportDate, @Section,
+    ''Physical: '' + CAST(physical_memory_kb/1024 AS VARCHAR) + '', Virtual: '' + CAST(virtual_memory_kb/1024 AS VARCHAR) +
+    '', Committed: '' + CAST(commited_kb/1024 AS VARCHAR) + '', Page Faults: '' + CAST(page_fault_count AS VARCHAR)
+FROM sys.dm_os_sys_memory;
+
+-- Section 5: Disk
+SET @Section = ''5. DISK SPACE'';
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail)
+EXEC xp_fixeddrives;
+
+-- Section 6: Failed Jobs
+SET @Section = ''6. FAILED JOBS (24h)'';
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail)
+SELECT 
+    @ReportDate, @Section,
+    ''Job: '' + j.name + '', Date: '' + CAST(h.run_date AS VARCHAR) + '', Time: '' + CAST(h.run_time AS VARCHAR)
+FROM msdb.dbo.sysjobhistory h
+JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
+WHERE h.run_status <> 1
+AND h.run_date >= CONVERT(VARCHAR, GETDATE()-1, 112);
+
+-- Section 7: Error Logs
+SET @Section = ''7. ERROR LOG - LAST 24H'';
+INSERT INTO dbo.SqlServerDailyHealthReport (ReportDate, Section, Detail)
+EXEC xp_readerrorlog 0, 1, NULL, NULL, GETDATE()-1, GETDATE(), ''DESC'';
+',  
+    @on_success_action = 1;
+GO
+
+-- Step 2: Send Email
+EXEC sp_add_jobstep  
+    @job_name = N'Daily_SQL_Health_Report',  
+    @step_name = N'Send Health Email',  
+    @subsystem = N'TSQL',  
+    @database_name = N'YourMonitoringDB',  
+    @command = N'
+EXEC msdb.dbo.sp_send_dbmail
+    @profile_name = ''YourMailProfile'',  -- Replace with your Database Mail Profile
+    @recipients = ''server.owner@example.com'',  -- Replace with actual recipient
+    @subject = ''SQL Server Daily Health Report'',
+    @body_format = ''HTML'',
+    @body = (
+        SELECT CAST(
+            ''<html><body><h2>SQL Server Daily Health Report</h2><table border="1" cellpadding="4" cellspacing="0">'' +
+            (
+                SELECT 
+                    ''<tr><td><b>'' + Section + ''</b></td><td>'' + REPLACE(Detail, ''<'', ''&lt;'') + ''</td></tr>''
+                FROM dbo.SqlServerDailyHealthReport
+                WHERE CAST(ReportDate AS DATE) = CAST(GETDATE() AS DATE)
+                FOR XML PATH(''''), TYPE
+            ).value(''.'', ''NVARCHAR(MAX)'') +
+            ''</table></body></html>'' AS NVARCHAR(MAX)
+        )
+    );
+',  
+    @on_success_action = 1;
+GO
+
+-- Schedule the job daily at 8:00 AM
+EXEC sp_add_schedule  
+    @schedule_name = N'Daily_8AM',  
+    @freq_type = 4,  -- daily
+    @freq_interval = 1,  
+    @active_start_time = 080000;  -- 08:00 AM
+GO
+
+-- Attach the schedule to the job
+EXEC sp_attach_schedule  
+    @job_name = N'Daily_SQL_Health_Report',  
+    @schedule_name = N'Daily_8AM';
+GO
+
+-- Add the job to SQL Agent
+EXEC sp_add_jobserver  
+    @job_name = N'Daily_SQL_Health_Report';
+GO
+
+
+
+
+
+
+
